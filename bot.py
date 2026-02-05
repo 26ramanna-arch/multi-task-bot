@@ -1,65 +1,89 @@
 import os
-import subprocess
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import yt_dlp
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from PIL import Image, ImageEnhance
-import pytesseract
 
-# --- CONFIGURATION ---
-TOKEN = "YOUR_BOT_TOKEN_HERE"
+# 1. SETUP: This pulls your token from Replit Secrets
+TOKEN = os.getenv("BOT_TOKEN")
 
-# --- FUNCTIONS ---
-
-# 1. Download Video
+# --- FEATURE 1: VIDEO DOWNLOADER ---
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
-    await update.message.reply_text("📥 Downloading... please wait.")
-    ydl_opts = {'format': 'best', 'outtmpl': 'video.mp4'}
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-    await update.message.reply_video(video=open('video.mp4', 'rb'))
-    os.remove('video.mp4')
+    chat_id = update.message.chat_id
+    
+    # Check if it's a link
+    if "http" not in url:
+        return
 
-# 2. Extract Text (OCR)
-async def extract_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = await update.message.photo[-1].get_file()
-    await photo.download_to_drive('image.jpg')
-    text = pytesseract.image_to_string(Image.open('image.jpg'))
-    await update.message.reply_text(f"📝 Extracted Text:\n\n{text if text else 'No text found.'}")
-    os.remove('image.jpg')
+    status_msg = await update.message.reply_text("⏳ Processing link... please wait.")
 
-# 3. Enhance Photo (Basic Sharpness)
-async def enhance_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = await update.message.photo[-1].get_file()
-    await photo.download_to_drive('input.jpg')
-    img = Image.open('input.jpg')
+    # Settings to bypass blocks and avoid playlists
+    ydl_opts = {
+        'format': 'best[ext=mp4]/best', # Get MP4 if possible
+        'outtmpl': f'video_{chat_id}.mp4',
+        'noplaylist': True, # CRITICAL: Stops it from trying to download 991 videos
+        'quiet': True,
+        # Pretend to be a normal Chrome browser
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        
+        filename = f'video_{chat_id}.mp4'
+        await update.message.reply_video(video=open(filename, 'rb'), caption="✅ Here is your video!")
+        os.remove(filename) # Delete file after sending to save space
+        await status_msg.delete()
+
+    except Exception as e:
+        error_text = str(e)
+        if "429" in error_text:
+            await update.message.reply_text("❌ YouTube Error 429: Replit's server is being rate-limited. Try again in 10 minutes or use a TikTok/Instagram link.")
+        else:
+            await update.message.reply_text(f"❌ Failed to download. Error: {error_text[:100]}")
+
+# --- FEATURE 2: PHOTO ENHANCER ---
+async def enhance_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo:
+        return
+
+    await update.message.reply_text("🪄 Enhancing photo...")
+    
+    # Download the photo
+    photo_file = await update.message.photo[-1].get_file()
+    path = "input.jpg"
+    await photo_file.download_to_drive(path)
+    
+    # Open and process
+    img = Image.open(path)
+    # Increase Sharpness (2.0 = double sharpness)
     img = ImageEnhance.Sharpness(img).enhance(2.0)
+    # Increase Contrast
     img = ImageEnhance.Contrast(img).enhance(1.2)
-    img.save('enhanced.jpg')
-    await update.message.reply_photo(photo=open('enhanced.jpg', 'rb'))
-    os.remove('input.jpg')
-    os.remove('enhanced.jpg')
+    
+    enhanced_path = "enhanced.jpg"
+    img.save(enhanced_path)
+    
+    await update.message.reply_photo(photo=open(enhanced_path, 'rb'), caption="✅ Enhanced!")
+    
+    # Cleanup
+    os.remove(path)
+    os.remove(enhanced_path)
 
-# 4. Remove Music (Mute Video)
-async def mute_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    video_file = await update.message.video.get_file()
-    await video_file.download_to_drive('input_v.mp4')
-    # Use ffmpeg (built-in on most servers) to remove audio
-    subprocess.run(['ffmpeg', '-i', 'input_v.mp4', '-an', '-vcodec', 'copy', 'muted.mp4'])
-    await update.message.reply_video(video=open('muted.mp4', 'rb'))
-    os.remove('input_v.mp4')
-    os.remove('muted.mp4')
+# --- MAIN ENGINE ---
+async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text:
+        await download_video(update, context)
+    elif update.message.photo:
+        await enhance_image(update, context)
 
-# --- MAIN RUNNER ---
 if __name__ == '__main__':
-    app = Application.builder().token(TOKEN).build()
-    
-    # Handlers
-    app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex("enhance"), enhance_photo))
-    app.add_handler(MessageHandler(filters.PHOTO, extract_text))
-    app.add_handler(MessageHandler(filters.VIDEO, mute_video))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Entity("url"), download_video))
-    
-    print("Bot is running...")
-    app.run_polling()
+    if not TOKEN:
+        print("❌ ERROR: Set BOT_TOKEN in Replit Secrets first!")
+    else:
+        print("🚀 Bot is starting...")
+        app = Application.builder().token(TOKEN).build()
+        app.add_handler(MessageHandler(filters.ALL, main_handler))
+        app.run_polling()
